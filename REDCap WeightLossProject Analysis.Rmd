@@ -1,0 +1,728 @@
+---
+title: 'DATA CLEANING AND ANALYSIS: Survival Analysis of Time to 5% Body Weight Reduction Among Overweight Adults: A Longitudinal Study'
+author: "MSc Group 1"
+date: "2026-03-01"
+output: 
+  word_document:
+    toc: true
+    toc_depth: 3
+    fig_width: 8
+    fig_height: 6
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# 1. SETUP AND PACKAGE INSTALLATION
+
+```{r setup-packages}
+# Install required packages if needed
+packages <- c("tidyverse", "survival", "survminer", "ggplot2", 
+              "dplyr", "tidyr", "lubridate", "tableone", 
+              "gridExtra", "ggfortify", "knitr")
+
+# Install missing packages
+installed_packages <- packages %in% rownames(installed.packages())
+if (any(installed_packages == FALSE)) {
+  install.packages(packages[!installed_packages])
+}
+
+# Load all packages
+lapply(packages, library, character.only = TRUE)
+
+# Set global theme for plots
+theme_set(theme_bw() + 
+          theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+                legend.position = "bottom"))
+```
+
+# 2. DATA IMPORT AND PREPARATION
+
+## 2.1 Import Raw Data
+
+```{r import-data}
+# Read the CSV file
+df <- read.csv("C:\\Users\\munya\\Downloads\\MSc2026Group1_DATA_2026-03-01_1556.csv", 
+               stringsAsFactors = FALSE)
+
+# Display basic information
+cat("Dataset dimensions:", dim(df)[1], "rows and", dim(df)[2], "columns\n")
+cat("Column names:\n")
+print(names(df))
+```
+
+## 2.2 Separate Baseline and Follow-up Data
+
+```{r separate-data}
+# Extract baseline data (enrollment visit)
+baseline_raw <- df %>%
+  filter(redcap_event_name == "baseline_arm_1") %>%
+  select(
+    id = participant_id,
+    age,
+    sex,
+    date_enrolled,
+    ethnic_group,
+    province = what_province_are_you_from,
+    baseline_weight,
+    height_cm,
+    bmi,
+    target_weight = target_weight_5_reduction,
+    have_you_lost_5_of_your_bo,
+    date_of_birth
+  ) %>%
+  mutate(
+    date_enrolled = as.Date(date_enrolled, format = "%d/%m/%Y"),
+    date_of_birth = as.Date(date_of_birth, format = "%d/%m/%Y"),
+    sex = factor(sex, levels = c(1, 2), labels = c("Male", "Female"))
+  )
+
+# Extract follow-up data (monthly visits)
+followup_raw <- df %>%
+  filter(redcap_event_name %in% c("month_1_arm_1", "month_2_arm_1", "month_3_arm_1", 
+                                   "month_4_arm_1", "month_5_arm_1", "month_6_arm_1")) %>%
+  select(
+    id = participant_id,
+    event = redcap_event_name,
+    visit_date,
+    current_weight,
+    pct_loss = percent_weight_loss,
+    event_status = event_indicator,
+    phys_activity = any_physical_activity,
+    phys_days = physical_activity_days,
+    diet = on_a_diet,
+    diet_score = diet_quality,
+    fastfood = ave_fastfood_consumption,
+    type_1 = type_of_physical_activity___1,
+    type_2 = type_of_physical_activity___2,
+    type_3 = type_of_physical_activity___3,
+    type_4 = type_of_physical_activity___4,
+    type_5 = type_of_physical_activity___5
+  ) %>%
+  mutate(
+    visit_date = as.Date(visit_date, format = "%d/%m/%Y"),
+    # Create physical activity type
+    phys_type = case_when(
+      type_2 == 1 ~ "Running",
+      type_3 == 1 ~ "Swimming",
+      type_4 == 1 ~ "Gym",
+      type_1 == 1 ~ "Walking",
+      type_5 == 1 ~ "Other",
+      TRUE ~ "None"
+    )
+  )
+```
+
+## 2.3 Merge Baseline and Follow-up Data
+
+```{r merge-data}
+# Merge datasets
+clean_data <- followup_raw %>%
+  left_join(baseline_raw, by = "id") %>%
+  mutate(
+    # Extract month number from event
+    month_num = case_when(
+      event == "month_1_arm_1" ~ 1,
+      event == "month_2_arm_1" ~ 2,
+      event == "month_3_arm_1" ~ 3,
+      event == "month_4_arm_1" ~ 4,
+      event == "month_5_arm_1" ~ 5,
+      event == "month_6_arm_1" ~ 6,
+      TRUE ~ NA_real_
+    ),
+    # Create physical activity level categories
+    phys_level = case_when(
+      phys_days >= 5 ~ "High (5+ days)",
+      phys_days >= 3 ~ "Moderate (3-4 days)",
+      phys_days >= 1 ~ "Low (1-2 days)",
+      phys_days == 0 ~ "Sedentary",
+      is.na(phys_days) & phys_activity == 0 ~ "Sedentary",
+      TRUE ~ "Unknown"
+    ),
+    # Create diet quality categories
+    diet_cat = case_when(
+      diet_score >= 7 ~ "Good (7-10)",
+      diet_score >= 4 ~ "Fair (4-6)",
+      diet_score >= 1 ~ "Poor (1-3)",
+      TRUE ~ "Unknown"
+    ),
+    # Fast food categories
+    fastfood_cat = case_when(
+      fastfood == 0 ~ "Never",
+      fastfood == 1 ~ "Rarely",
+      fastfood == 2 ~ "Sometimes",
+      fastfood == 3 ~ "Often",
+      fastfood >= 4 ~ "Very Often",
+      TRUE ~ "Unknown"
+    )
+  ) %>%
+  # Remove rows with no weight data
+  filter(!is.na(current_weight) | !is.na(pct_loss))
+```
+
+## 2.4 Verify Data Structure
+
+```{r verify-data}
+# Check merged data
+cat("=== MERGED DATA SUMMARY ===\n")
+cat("Total rows:", nrow(clean_data), "\n")
+cat("Unique participants:", length(unique(clean_data$id)), "\n")
+cat("Age range:", range(clean_data$age, na.rm = TRUE), "\n")
+cat("\nSex distribution:\n")
+print(table(clean_data$sex, useNA = "ifany"))
+
+# View sample of data
+clean_data %>%
+  select(id, event, month_num, age, sex, baseline_weight, current_weight, pct_loss, event_status) %>%
+  head(10) %>%
+  knitr::kable(caption = "Sample of Clean Data")
+```
+
+# 3. CREATE SURVIVAL ANALYSIS DATASET
+
+## 3.1 Calculate Time Variables
+
+```{r time-variables}
+# Calculate time from enrollment to each visit
+time_to_event <- clean_data %>%
+  mutate(
+    days_since_enrollment = as.numeric(difftime(visit_date, date_enrolled, units = "days")),
+    weeks_since_enrollment = days_since_enrollment / 7,
+    months_since_enrollment = month_num
+  )
+```
+
+## 3.2 Build Survival Dataset
+
+```{r survival-dataset}
+# Create one row per participant with survival information
+survival_data <- time_to_event %>%
+  group_by(id) %>%
+  summarise(
+    # Time to event (if achieved)
+    time_to_event_days = min(days_since_enrollment[event_status == 1], na.rm = TRUE),
+    time_to_event_weeks = min(weeks_since_enrollment[event_status == 1], na.rm = TRUE),
+    time_to_event_months = min(months_since_enrollment[event_status == 1], na.rm = TRUE),
+    
+    # Event occurrence
+    event_occurred = ifelse(any(event_status == 1, na.rm = TRUE), 1, 0),
+    
+    # Last follow-up time (for censored)
+    last_followup_days = max(days_since_enrollment, na.rm = TRUE),
+    last_followup_weeks = max(weeks_since_enrollment, na.rm = TRUE),
+    last_followup_months = max(months_since_enrollment, na.rm = TRUE),
+    
+    # Baseline characteristics
+    age = first(na.omit(age)),
+    sex = first(na.omit(sex)),
+    bmi = first(na.omit(bmi)),
+    baseline_weight = first(na.omit(baseline_weight)),
+    
+    .groups = "drop"
+  ) %>%
+  mutate(
+    # Determine final time (event time for successes, last follow-up for censored)
+    time_days = ifelse(event_occurred == 1, time_to_event_days, last_followup_days),
+    time_weeks = ifelse(event_occurred == 1, time_to_event_weeks, last_followup_weeks),
+    time_months = ifelse(event_occurred == 1, time_to_event_months, last_followup_months),
+    
+    # Handle infinite/NA values
+    time_days = ifelse(is.infinite(time_days) | is.na(time_days), 0, time_days),
+    time_weeks = ifelse(is.infinite(time_weeks) | is.na(time_weeks), 0, time_weeks),
+    time_months = ifelse(is.infinite(time_months) | is.na(time_months), 0, time_months),
+    
+    # Create BMI categories
+    bmi_cat = case_when(
+      bmi < 25 ~ "Normal",
+      bmi < 30 ~ "Overweight",
+      bmi >= 30 ~ "Obese",
+      TRUE ~ "Unknown"
+    )
+  )
+```
+
+# 4. DESCRIPTIVE STATISTICS
+
+## 4.1 Study Population Summary
+
+```{r summary-stats}
+cat("\n=== STUDY POPULATION SUMMARY ===\n")
+cat("Total participants:", nrow(survival_data), "\n")
+cat("Achieved 5% weight loss:", sum(survival_data$event_occurred), 
+    sprintf("(%.1f%%)", mean(survival_data$event_occurred) * 100), "\n")
+
+cat("\nSex distribution:\n")
+print(table(survival_data$sex, useNA = "ifany"))
+
+cat("\nBMI categories:\n")
+print(table(survival_data$bmi_cat, useNA = "ifany"))
+
+cat("\nAge summary:\n")
+print(summary(survival_data$age))
+
+cat("\nBMI summary:\n")
+print(summary(survival_data$bmi))
+```
+
+## 4.2 Table 1: Participant Characteristics
+
+```{r table1}
+# Create Table 1 stratified by event occurrence
+vars <- c("age", "sex", "bmi")
+factor_vars <- c("sex")
+
+table1 <- CreateTableOne(vars = vars, 
+                         strata = "event_occurred", 
+                         data = survival_data,
+                         factorVars = factor_vars)
+
+print(table1, showAllLevels = TRUE, formatOptions = list(big.mark = ","))
+```
+
+# 5. KAPLAN-MEIER SURVIVAL ANALYSIS
+
+## 5.1 Overall Survival
+
+```{r km-overall}
+# Create survival object
+surv_obj <- Surv(time = survival_data$time_weeks, 
+                 event = survival_data$event_occurred)
+
+# Overall Kaplan-Meier fit
+km_overall <- survfit(surv_obj ~ 1, data = survival_data)
+
+# Print results
+cat("\n=== OVERALL SURVIVAL ANALYSIS ===\n")
+print(km_overall)
+
+# Plot overall survival
+plot_overall <- ggsurvplot(
+  km_overall,
+  data = survival_data,
+  title = "Overall Probability of Not Achieving 5% Weight Loss",
+  xlab = "Time (weeks)",
+  ylab = "Survival Probability",
+  legend = "none",
+  conf.int = TRUE,
+  risk.table = TRUE,
+  risk.table.height = 0.25,
+  ggtheme = theme_bw(),
+  break.time.by = 4
+)
+
+print(plot_overall)
+```
+
+## 5.2 Survival by Sex
+
+```{r km-sex}
+# KM by sex
+km_sex <- survfit(surv_obj ~ sex, data = survival_data)
+
+# Plot by sex
+plot_sex <- ggsurvplot(
+  km_sex,
+  data = survival_data,
+  title = "Time to 5% Weight Loss by Sex",
+  xlab = "Time (weeks)",
+  ylab = "Survival Probability",
+  legend.title = "Sex",
+  conf.int = TRUE,
+  risk.table = TRUE,
+  risk.table.height = 0.25,
+  ggtheme = theme_bw(),
+  break.time.by = 4,
+  pval = TRUE
+)
+
+print(plot_sex)
+
+# Log-rank test
+cat("\nLog-rank test for sex difference:\n")
+print(survdiff(surv_obj ~ sex, data = survival_data))
+```
+
+## 5.3 Survival by BMI Category
+
+```{r km-bmi}
+# KM by BMI category
+km_bmi <- survfit(surv_obj ~ bmi_cat, data = survival_data)
+
+# Plot by BMI
+plot_bmi <- ggsurvplot(
+  km_bmi,
+  data = survival_data,
+  title = "Time to 5% Weight Loss by BMI Category",
+  xlab = "Time (weeks)",
+  ylab = "Survival Probability",
+  legend.title = "BMI Category",
+  conf.int = TRUE,
+  risk.table = TRUE,
+  risk.table.height = 0.25,
+  ggtheme = theme_bw(),
+  break.time.by = 4,
+  pval = TRUE
+)
+
+print(plot_bmi)
+
+# Log-rank test
+cat("\nLog-rank test for BMI category difference:\n")
+print(survdiff(surv_obj ~ bmi_cat, data = survival_data))
+```
+
+## 5.4 Create Physical Activity Categories
+
+```{r phys-categories}
+# Add physical activity categories from follow-up data
+phys_summary <- time_to_event %>%
+  group_by(id) %>%
+  summarise(avg_phys_days = mean(phys_days, na.rm = TRUE)) %>%
+  mutate(
+    phys_cat = case_when(
+      avg_phys_days <= 2 ~ "Low (0-2 days/week)",
+      avg_phys_days <= 4 ~ "Moderate (3-4 days/week)",
+      avg_phys_days >= 5 ~ "High (5+ days/week)",
+      TRUE ~ "Unknown"
+    )
+  )
+
+survival_data <- survival_data %>%
+  left_join(phys_summary %>% select(id, phys_cat), by = "id")
+```
+
+## 5.5 Survival by Physical Activity Level
+
+```{r km-phys}
+# KM by physical activity
+km_phys <- survfit(surv_obj ~ phys_cat, data = survival_data)
+
+# Plot by physical activity
+plot_phys <- ggsurvplot(
+  km_phys,
+  data = survival_data,
+  title = "Time to 5% Weight Loss by Physical Activity Level",
+  xlab = "Time (weeks)",
+  ylab = "Survival Probability",
+  legend.title = "Physical Activity",
+  conf.int = TRUE,
+  risk.table = TRUE,
+  risk.table.height = 0.25,
+  ggtheme = theme_bw(),
+  break.time.by = 4,
+  pval = TRUE
+)
+
+print(plot_phys)
+
+# Log-rank test
+cat("\nLog-rank test for physical activity difference:\n")
+print(survdiff(surv_obj ~ phys_cat, data = survival_data))
+```
+
+## 5.6 Create Diet Quality Categories
+
+```{r diet-categories}
+# Add diet categories from follow-up data
+diet_summary <- time_to_event %>%
+  group_by(id) %>%
+  summarise(avg_diet_score = mean(diet_score, na.rm = TRUE)) %>%
+  mutate(
+    diet_cat = case_when(
+      avg_diet_score <= 3 ~ "Poor (1-3)",
+      avg_diet_score <= 6 ~ "Fair (4-6)",
+      avg_diet_score >= 7 ~ "Good (7-10)",
+      TRUE ~ "Unknown"
+    )
+  )
+
+survival_data <- survival_data %>%
+  left_join(diet_summary %>% select(id, diet_cat), by = "id")
+```
+
+## 5.7 Survival by Diet Quality
+
+```{r km-diet}
+# KM by diet quality
+km_diet <- survfit(surv_obj ~ diet_cat, data = survival_data)
+
+# Plot by diet quality
+plot_diet <- ggsurvplot(
+  km_diet,
+  data = survival_data,
+  title = "Time to 5% Weight Loss by Diet Quality",
+  xlab = "Time (weeks)",
+  ylab = "Survival Probability",
+  legend.title = "Diet Quality",
+  conf.int = TRUE,
+  risk.table = TRUE,
+  risk.table.height = 0.25,
+  ggtheme = theme_bw(),
+  break.time.by = 4,
+  pval = TRUE
+)
+
+print(plot_diet)
+
+# Log-rank test
+cat("\nLog-rank test for diet quality difference:\n")
+print(survdiff(surv_obj ~ diet_cat, data = survival_data))
+```
+
+# 6. COX PROPORTIONAL HAZARDS REGRESSION
+
+## 6.1 Univariate Cox Models
+
+```{r cox-univariate}
+# Run univariate Cox models
+cox_sex <- coxph(surv_obj ~ sex, data = survival_data)
+cox_age <- coxph(surv_obj ~ age, data = survival_data)
+cox_bmi <- coxph(surv_obj ~ bmi, data = survival_data)
+
+# Display results
+cat("\n=== SEX (Univariate) ===\n")
+print(summary(cox_sex))
+
+cat("\n=== AGE (Univariate) ===\n")
+print(summary(cox_age))
+
+cat("\n=== BMI (Univariate) ===\n")
+print(summary(cox_bmi))
+```
+
+## 6.2 Multivariable Cox Model
+
+```{r cox-multivariable}
+# Multivariable Cox model
+cox_multi <- coxph(surv_obj ~ sex + age + bmi, data = survival_data)
+
+cat("\n=== MULTIVARIABLE COX MODEL ===\n")
+print(summary(cox_multi))
+
+# Create hazard ratio table
+hr_table <- data.frame(
+  Variable = c("Sex (Female vs Male)", "Age (per year)", "BMI (per unit)"),
+  HR = round(exp(coef(cox_multi)), 2),
+  CI_lower = round(exp(confint(cox_multi))[,1], 2),
+  CI_upper = round(exp(confint(cox_multi))[,2], 2),
+  P_value = round(summary(cox_multi)$coefficients[,5], 3)
+)
+
+hr_table$CI <- paste0(hr_table$CI_lower, "-", hr_table$CI_upper)
+hr_table <- hr_table %>% select(Variable, HR, CI, P_value)
+
+knitr::kable(hr_table, caption = "Multivariable Cox Model Results")
+```
+
+## 6.3 Forest Plot of Hazard Ratios
+
+```{r forest-plot}
+# Create forest plot
+hr_data <- data.frame(
+  variable = c("Sex (Female vs Male)", "Age (per year)", "BMI (per unit)"),
+  HR = exp(coef(cox_multi)),
+  lower = exp(confint(cox_multi)[,1]),
+  upper = exp(confint(cox_multi)[,2])
+)
+
+hr_data$variable <- factor(hr_data$variable, levels = rev(hr_data$variable))
+
+forest_plot <- ggplot(hr_data, aes(x = HR, y = variable)) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "red", alpha = 0.5) +
+  geom_errorbarh(aes(xmin = lower, xmax = upper), height = 0.2, size = 0.8) +
+  geom_point(size = 4, color = "steelblue") +
+  scale_x_log10(breaks = c(0.5, 0.75, 1, 1.25, 1.5)) +
+  labs(title = "Predictors of Time to 5% Weight Loss",
+       x = "Hazard Ratio (95% CI)",
+       y = "") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        panel.grid.minor = element_blank())
+
+print(forest_plot)
+```
+
+## 6.4 Check Proportional Hazards Assumption
+
+```{r proportional-hazards}
+# Test proportional hazards assumption
+cox_zph <- cox.zph(cox_multi)
+print(cox_zph)
+
+# Plot Schoenfeld residuals
+par(mfrow = c(2, 2))
+plot(cox_zph)
+```
+
+# 7. WEIGHT LOSS TRAJECTORIES
+
+## 7.1 Individual Participant Trajectories
+
+```{r trajectories}
+# Prepare trajectory data
+traj_data <- time_to_event %>%
+  filter(!is.na(pct_loss)) %>%
+  mutate(
+    achieved = ifelse(id %in% survival_data$id[survival_data$event_occurred == 1], 
+                      "Achieved 5%", "Did not achieve")
+  )
+
+# Plot trajectories
+traj_plot <- ggplot(traj_data, aes(x = weeks_since_enrollment, 
+                                    y = pct_loss, 
+                                    group = id,
+                                    color = achieved)) +
+  geom_line(alpha = 0.6, size = 0.8) +
+  geom_hline(yintercept = -5, linetype = "dashed", color = "red", size = 1) +
+  geom_hline(yintercept = 0, linetype = "solid", color = "gray", size = 0.5) +
+  scale_color_manual(values = c("Achieved 5%" = "darkgreen", 
+                                 "Did not achieve" = "gray70")) +
+  labs(title = "Individual Weight Loss Trajectories",
+       x = "Time (weeks)",
+       y = "Percent Weight Loss (%)",
+       color = "") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        legend.position = "bottom")
+
+print(traj_plot)
+```
+
+## 7.2 Cumulative Incidence
+
+```{r cumulative-incidence}
+# Calculate cumulative incidence
+cum_inc <- data.frame(
+  time = summary(km_overall)$time,
+  surv = summary(km_overall)$surv,
+  cum_inc = 1 - summary(km_overall)$surv,
+  lower = 1 - summary(km_overall)$upper,
+  upper = 1 - summary(km_overall)$lower
+)
+
+# Plot cumulative incidence
+cum_plot <- ggplot(cum_inc, aes(x = time, y = cum_inc)) +
+  geom_step(size = 1.2, color = "darkblue") +
+  geom_ribbon(aes(ymin = lower, ymax = upper), 
+              alpha = 0.2, fill = "blue") +
+  labs(title = "Cumulative Incidence of 5% Weight Loss",
+       x = "Time (weeks)",
+       y = "Proportion Achieving Goal") +
+  scale_y_continuous(labels = scales::percent, limits = c(0, 1)) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+print(cum_plot)
+```
+
+# 8. RISK TABLES AND KEY FINDINGS
+
+## 8.1 Risk Table at Key Time Points
+
+```{r risk-table}
+# Extract survival probabilities at key time points
+time_points <- c(4, 8, 12, 16, 20, 24)
+surv_summary <- summary(km_overall, times = time_points)
+
+risk_table <- data.frame(
+  `Time (weeks)` = time_points,
+  `Number at Risk` = surv_summary$n.risk,
+  `Events` = surv_summary$n.event,
+  `Survival Probability` = round(surv_summary$surv, 3),
+  `Cumulative Incidence` = round(1 - surv_summary$surv, 3)
+)
+
+knitr::kable(risk_table, caption = "Risk Table at Key Time Points", digits = 3)
+```
+
+## 8.2 Summary Statistics for Report
+
+```{r final-summary}
+# Calculate key statistics
+summary_stats <- list(
+  n_total = nrow(survival_data),
+  n_events = sum(survival_data$event_occurred),
+  event_percent = mean(survival_data$event_occurred) * 100,
+  mean_age = mean(survival_data$age, na.rm = TRUE),
+  sd_age = sd(survival_data$age, na.rm = TRUE),
+  percent_female = mean(survival_data$sex == "Female", na.rm = TRUE) * 100,
+  mean_bmi = mean(survival_data$bmi, na.rm = TRUE),
+  sd_bmi = sd(survival_data$bmi, na.rm = TRUE),
+  median_survival_weeks = summary(km_overall)$table["median"]
+)
+
+# Print formatted summary
+cat("\n", rep("=", 50), "\n", sep="")
+cat("           STUDY SUMMARY STATISTICS\n")
+cat(rep("=", 50), "\n\n", sep="")
+cat(sprintf("Total participants: %d\n", summary_stats$n_total))
+cat(sprintf("Achieved 5%% weight loss: %d (%.1f%%)\n", 
+            summary_stats$n_events, summary_stats$event_percent))
+cat(sprintf("Mean age: %.1f years (SD = %.1f)\n", 
+            summary_stats$mean_age, summary_stats$sd_age))
+cat(sprintf("Female participants: %.1f%%\n", summary_stats$percent_female))
+cat(sprintf("Mean BMI: %.1f kg/m² (SD = %.1f)\n", 
+            summary_stats$mean_bmi, summary_stats$sd_bmi))
+cat(sprintf("Median time to 5%% weight loss: %.1f weeks\n", 
+            summary_stats$median_survival_weeks))
+```
+
+# 9. EXPORT RESULTS
+
+## 9.1 Save Plots
+
+```{r save-plots}
+# Create figures directory
+if(!dir.exists("figures")) dir.create("figures")
+
+# Save all plots
+ggsave("figures/01_overall_survival.png", plot_overall$plot, 
+       width = 8, height = 6, dpi = 300)
+ggsave("figures/02_survival_by_sex.png", plot_sex$plot, 
+       width = 8, height = 6, dpi = 300)
+ggsave("figures/03_survival_by_bmi.png", plot_bmi$plot, 
+       width = 8, height = 6, dpi = 300)
+ggsave("figures/04_survival_by_phys_activity.png", plot_phys$plot, 
+       width = 8, height = 6, dpi = 300)
+ggsave("figures/05_survival_by_diet.png", plot_diet$plot, 
+       width = 8, height = 6, dpi = 300)
+ggsave("figures/06_forest_plot.png", forest_plot, 
+       width = 8, height = 5, dpi = 300)
+ggsave("figures/07_weight_trajectories.png", traj_plot, 
+       width = 10, height = 6, dpi = 300)
+ggsave("figures/08_cumulative_incidence.png", cum_plot, 
+       width = 8, height = 6, dpi = 300)
+
+cat("\n✅ All plots saved to 'figures' folder\n")
+```
+
+## 9.2 Export Data
+
+```{r export-data}
+# Export datasets
+write.csv(survival_data, "survival_analysis_data.csv", row.names = FALSE)
+write.csv(hr_table, "cox_model_results.csv", row.names = FALSE)
+write.csv(risk_table, "risk_table.csv", row.names = FALSE)
+
+cat("\n✅ Data exported to CSV files\n")
+```
+
+## 9.3 Session Information
+
+```{r session-info}
+# Save session info for reproducibility
+sink("session_info.txt")
+sessionInfo()
+sink()
+
+cat("\n✅ Session info saved to 'session_info.txt'\n")
+```
+
+---
+
+```{r echo=FALSE, results='asis'}
+cat("\n\n---\n")
+cat("**Analysis complete!** Generated on: ", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), "\n")
+cat("**Total files created:** 8 plots, 3 CSV files, 1 session info file\n")
+```
